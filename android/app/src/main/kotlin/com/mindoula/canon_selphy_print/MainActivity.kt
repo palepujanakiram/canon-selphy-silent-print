@@ -240,22 +240,39 @@ class MainActivity : FlutterActivity() {
         val srcW = bmp.width.toFloat()
         val srcH = bmp.height.toFloat()
 
-        // Scale to fit entirely within the target (letterbox — no cropping).
-        val scale = minOf(targetW / srcW, targetH / srcH)
-        val scaledW = (srcW * scale).toInt()
-        val scaledH = (srcH * scale).toInt()
-
-        val scaled = Bitmap.createScaledBitmap(bmp, scaledW, scaledH, true)
-        if (scaled !== bmp) bmp.recycle()
-
-        // Composite centered onto a white canvas of the exact target dimensions.
-        var canvas = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-        val c = Canvas(canvas)
-        c.drawColor(Color.WHITE)
-        val left = (targetW - scaledW) / 2f
-        val top  = (targetH - scaledH) / 2f
-        c.drawBitmap(scaled, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
-        scaled.recycle()
+        // Borderless: scale to FILL the paper (center-crop any overflow) so the
+        // photo covers the full 4×6 with no white bars.
+        // Bordered: scale to FIT within the bordered area (whole image visible).
+        var canvas: Bitmap
+        if (!bordered) {
+            val scale = maxOf(targetW / srcW, targetH / srcH)
+            val scaledW = (srcW * scale).toInt()
+            val scaledH = (srcH * scale).toInt()
+            val scaled = Bitmap.createScaledBitmap(bmp, scaledW, scaledH, true)
+            bmp.recycle()
+            val cropX = (scaledW - targetW) / 2
+            val cropY = (scaledH - targetH) / 2
+            val cropped = Bitmap.createBitmap(scaled, cropX, cropY, targetW, targetH)
+            if (cropped !== scaled) scaled.recycle()
+            canvas = cropped
+        } else {
+            // Fit inside the bordered area (4% inset on each side).
+            val borderPx = (targetW * 0.04f).toInt()
+            val innerW = targetW - borderPx * 2
+            val innerH = targetH - borderPx * 2
+            val scale = minOf(innerW / srcW, innerH / srcH)
+            val scaledW = (srcW * scale).toInt()
+            val scaledH = (srcH * scale).toInt()
+            val scaled = Bitmap.createScaledBitmap(bmp, scaledW, scaledH, true)
+            bmp.recycle()
+            canvas = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+            val c = Canvas(canvas)
+            c.drawColor(Color.WHITE)
+            val left = (targetW - scaledW) / 2f
+            val top  = (targetH - scaledH) / 2f
+            c.drawBitmap(scaled, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
+            scaled.recycle()
+        }
 
         // ── Brightness ────────────────────────────────────────────────────────
         if (brightness != 0) {
@@ -292,21 +309,6 @@ class MainActivity : FlutterActivity() {
                 canvas.recycle()
                 canvas = filtered
             }
-        }
-
-        // ── Bordered ─────────────────────────────────────────────────────────
-        if (bordered) {
-            val borderThickness = (targetW * 0.04f).toInt()
-            val innerW = targetW - borderThickness * 2
-            val innerH = targetH - borderThickness * 2
-            val inner = Bitmap.createScaledBitmap(canvas, innerW, innerH, true)
-            val borderedBmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            val bc = Canvas(borderedBmp)
-            bc.drawColor(Color.WHITE)
-            bc.drawBitmap(inner, borderThickness.toFloat(), borderThickness.toFloat(), Paint(Paint.FILTER_BITMAP_FLAG))
-            inner.recycle()
-            canvas.recycle()
-            canvas = borderedBmp
         }
 
         val outFile = File(cacheDir, "selphy_print_${System.currentTimeMillis()}.jpg")
