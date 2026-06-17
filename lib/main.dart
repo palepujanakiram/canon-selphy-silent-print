@@ -12,14 +12,16 @@ void main() {
 
 class PrintSettings {
   final int copies;
+  final String paperSize;
   final String filter;
   final int brightness;
   final bool bordered;
 
-  static const _filterOptions = ['Off', 'Vivid', 'B&W', 'Sepia'];
+  static const paperSizes = ['4x6', 'L-size', 'Card'];
 
   const PrintSettings({
     this.copies = 1,
+    this.paperSize = '4x6',
     this.filter = 'Off',
     this.brightness = 0,
     this.bordered = false,
@@ -27,6 +29,7 @@ class PrintSettings {
 
   Map<String, dynamic> toMap() => {
         'copies': copies,
+        'paperSize': paperSize,
         'filter': filter,
         'brightness': brightness,
         'bordered': bordered,
@@ -34,12 +37,14 @@ class PrintSettings {
 
   PrintSettings copyWith({
     int? copies,
+    String? paperSize,
     String? filter,
     int? brightness,
     bool? bordered,
   }) =>
       PrintSettings(
         copies: copies ?? this.copies,
+        paperSize: paperSize ?? this.paperSize,
         filter: filter ?? this.filter,
         brightness: brightness ?? this.brightness,
         bordered: bordered ?? this.bordered,
@@ -47,6 +52,7 @@ class PrintSettings {
 
   static PrintSettings fromPrefs(SharedPreferences prefs) => PrintSettings(
         copies: prefs.getInt('ps_copies') ?? 1,
+        paperSize: prefs.getString('ps_paperSize') ?? '4x6',
         filter: prefs.getString('ps_filter') ?? 'Off',
         brightness: prefs.getInt('ps_brightness') ?? 0,
         bordered: prefs.getBool('ps_bordered') ?? false,
@@ -54,6 +60,7 @@ class PrintSettings {
 
   Future<void> saveToPrefs(SharedPreferences prefs) async {
     await prefs.setInt('ps_copies', copies);
+    await prefs.setString('ps_paperSize', paperSize);
     await prefs.setString('ps_filter', filter);
     await prefs.setInt('ps_brightness', brightness);
     await prefs.setBool('ps_bordered', bordered);
@@ -182,7 +189,7 @@ class _PrintScreenState extends State<PrintScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final copiesLabel = _settings.copies == 1 ? '1 copy' : '${_settings.copies} copies';
+    final copiesLabel = '${_settings.copies == 1 ? '1 copy' : '${_settings.copies} copies'} · ${_settings.paperSize}';
     return Scaffold(
       appBar: AppBar(
         title: const Text('Selphy CP1500 — USB Print'),
@@ -384,6 +391,24 @@ class _SettingsSheetState extends State<_SettingsSheet> {
                 ],
               ),
             ],
+          ),
+          const SizedBox(height: 16),
+
+          // Paper Size
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text('Paper Size', style: TextStyle(fontSize: 16)),
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: '4x6',   label: Text('4×6')),
+              ButtonSegment(value: 'L-size', label: Text('L-size')),
+              ButtonSegment(value: 'Card',   label: Text('Card')),
+            ],
+            selected: {_draft.paperSize},
+            onSelectionChanged: (v) =>
+                setState(() => _draft = _draft.copyWith(paperSize: v.first)),
           ),
           const SizedBox(height: 16),
 

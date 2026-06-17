@@ -21,7 +21,6 @@ import jp.co.canon.android.print.selphy.usbsdk.CanonPrintJob
 import jp.co.canon.android.print.selphy.usbsdk.CanonPrintSizeInfo
 import jp.co.canon.android.print.selphy.usbsdk.CanonPrinterAccessoryInfo
 import jp.co.canon.android.print.selphy.usbsdk.CanonPrinterStatus
-import jp.co.canon.android.print.selphy.usbsdk.CanonStatusCallback
 import jp.co.canon.android.print.selphy.usbsdk.CanonUsbManager
 import java.io.File
 import java.io.FileOutputStream
@@ -46,10 +45,11 @@ class MainActivity : FlutterActivity() {
                         if (filePath == null) result.error("INVALID_ARG", "filePath is required", null)
                         else {
                             val copies     = call.argument<Int>("copies") ?: 1
+                            val paperSize  = call.argument<String>("paperSize") ?: "4x6"
                             val filter     = call.argument<String>("filter") ?: "Off"
                             val brightness = call.argument<Int>("brightness") ?: 0
                             val bordered   = call.argument<Boolean>("bordered") ?: false
-                            startPrint(filePath, copies, filter, brightness, bordered, result)
+                            startPrint(filePath, copies, paperSize, filter, brightness, bordered, result)
                         }
                     }
                     else -> result.notImplemented()
@@ -131,6 +131,7 @@ class MainActivity : FlutterActivity() {
     private fun startPrint(
         filePath: String,
         copies: Int,
+        paperSize: String,
         filter: String,
         brightness: Int,
         bordered: Boolean,
@@ -146,78 +147,66 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        // Step 1: get printer status to find the installed paper cassette size.
-        device.getStatus(object : CanonStatusCallback() {
-            override fun onGotStatus(status: CanonPrinterStatus) {
-                val paperType = status.accessoryInfo?.paperCassetteStatus
-                    ?: CanonPrinterAccessoryInfo.PaperCassetteStatus.Post
+        // Resolve the user-selected paper size to the SDK cassette type and JPEG dimensions.
+        val paperType = when (paperSize) {
+            "L-size" -> CanonPrinterAccessoryInfo.PaperCassetteStatus.L
+            "Card"   -> CanonPrinterAccessoryInfo.PaperCassetteStatus.Card
+            else     -> CanonPrinterAccessoryInfo.PaperCassetteStatus.Post  // default: 4x6
+        }
+        val sizeInfo = CanonPrintSizeInfo.getPrintSizeInfo(paperType)
+        val required = sizeInfo.printableJpegSize  // Point: x=width, y=height
 
-                if (paperType == CanonPrinterAccessoryInfo.PaperCassetteStatus.None ||
-                    paperType == CanonPrinterAccessoryInfo.PaperCassetteStatus.Unknown
-                ) {
-                    mainHandler.post {
-                        result.error("NO_PAPER", "No paper cassette detected. Insert a paper cassette.", null)
-                    }
-                    return
-                }
+        // Prepare the image at the required dimensions.
+        val resizedFile = try {
+            resizeImageForPrinting(filePath, required.x, required.y, filter, brightness, bordered)
+        } catch (e: Exception) {
+            mainHandler.post {
+                result.error("IMAGE_ERROR", "Failed to prepare image: ${e.message}", null)
+            }
+            return
+        }
 
-                // Step 2: find out the exact JPEG dimensions required for this paper size.
-                val sizeInfo = CanonPrintSizeInfo.getPrintSizeInfo(paperType)
-                val required = sizeInfo.printableJpegSize // Point: x=width, y=height
+        // Configure and submit the print job.
+        val job = CanonPrintJob()
+        job.setPrintConfiguration(CanonPrintJob.Configuration.Copies, copies)
 
-                // Step 3: resize and orient the source JPEG to the required dimensions.
-                val resizedFile = try {
-                    resizeImageForPrinting(filePath, required.x, required.y, filter, brightness, bordered)
-                } catch (e: Exception) {
-                    mainHandler.post {
-                        result.error("IMAGE_ERROR", "Failed to prepare image: ${e.message}", null)
-                    }
-                    return
-                }
+        val uri = Uri.fromFile(resizedFile)
+        if (!job.setPrintFile(uri, this)) {
+            resizedFile.delete()
+            mainHandler.post {
+                result.error("FILE_ERROR", "Printer rejected the image. Ensure the correct paper cassette is loaded.", null)
+            }
+            return
+        }
 
-                // Step 4: configure and submit the print job.
-                val job = CanonPrintJob()
-                job.setPrintConfiguration(CanonPrintJob.Configuration.Copies, copies)
+        val resolved = AtomicBoolean(false)
 
-                val uri = Uri.fromFile(resizedFile)
-                if (!job.setPrintFile(uri, this@MainActivity)) {
+        val started = device.print(job, object : CanonPrintCallback() {
+            override fun onChangedJobStatus(job: CanonPrintJob) {
+                if (job.isFinished && resolved.compareAndSet(false, true)) {
                     resizedFile.delete()
+                    val statusMsg = job.status.toString()
                     mainHandler.post {
-                        result.error("FILE_ERROR", "Printer rejected the image. Check paper cassette size.", null)
-                    }
-                    return
-                }
-
-                val resolved = AtomicBoolean(false)
-
-                val started = device.print(job, object : CanonPrintCallback() {
-                    override fun onChangedJobStatus(job: CanonPrintJob) {
-                        if (job.isFinished && resolved.compareAndSet(false, true)) {
-                            resizedFile.delete()
-                            val statusMsg = job.status.toString()
-                            mainHandler.post {
-                                if (statusMsg.contains("Error", ignoreCase = true)) {
-                                    result.error("PRINT_ERROR", "Print failed: $statusMsg", null)
-                                } else {
-                                    result.success("Print completed: $statusMsg")
-                                }
-                            }
+                        if (statusMsg.contains("Error", ignoreCase = true)) {
+                            result.error("PRINT_ERROR", "Print failed: $statusMsg", null)
+                        } else {
+                            result.success("Print completed: $statusMsg")
                         }
-                    }
-
-                    override fun onChangedPrinterStatus(job: CanonPrintJob, status: CanonPrinterStatus) {
-                        // no-op
-                    }
-                })
-
-                if (!started && resolved.compareAndSet(false, true)) {
-                    resizedFile.delete()
-                    mainHandler.post {
-                        result.error("PRINT_START_FAILED", "Failed to start print job.", null)
                     }
                 }
             }
+
+            override fun onChangedPrinterStatus(job: CanonPrintJob, status: CanonPrinterStatus) {
+                // no-op
+            }
         })
+
+        if (!started && resolved.compareAndSet(false, true)) {
+            resizedFile.delete()
+            mainHandler.post {
+                result.error("PRINT_START_FAILED", "Failed to start print job.", null)
+            }
+        }
     }
 
     // ── Image resize ──────────────────────────────────────────────────────────
