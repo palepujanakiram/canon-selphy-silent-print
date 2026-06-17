@@ -3,6 +3,8 @@ package com.mindoula.canon_selphy_print
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageDecoder
 import android.graphics.Paint
 import android.net.Uri
@@ -42,7 +44,13 @@ class MainActivity : FlutterActivity() {
                     "print" -> {
                         val filePath = call.argument<String>("filePath")
                         if (filePath == null) result.error("INVALID_ARG", "filePath is required", null)
-                        else startPrint(filePath, result)
+                        else {
+                            val copies     = call.argument<Int>("copies") ?: 1
+                            val filter     = call.argument<String>("filter") ?: "Off"
+                            val brightness = call.argument<Int>("brightness") ?: 0
+                            val bordered   = call.argument<Boolean>("bordered") ?: false
+                            startPrint(filePath, copies, filter, brightness, bordered, result)
+                        }
                     }
                     else -> result.notImplemented()
                 }
@@ -120,7 +128,14 @@ class MainActivity : FlutterActivity() {
 
     // ── Print ─────────────────────────────────────────────────────────────────
 
-    private fun startPrint(filePath: String, result: MethodChannel.Result) {
+    private fun startPrint(
+        filePath: String,
+        copies: Int,
+        filter: String,
+        brightness: Int,
+        bordered: Boolean,
+        result: MethodChannel.Result
+    ) {
         val ctx = applicationContext
         val device = cachedDevice
 
@@ -152,7 +167,7 @@ class MainActivity : FlutterActivity() {
 
                 // Step 3: resize and orient the source JPEG to the required dimensions.
                 val resizedFile = try {
-                    resizeImageForPrinting(filePath, required.x, required.y)
+                    resizeImageForPrinting(filePath, required.x, required.y, filter, brightness, bordered)
                 } catch (e: Exception) {
                     mainHandler.post {
                         result.error("IMAGE_ERROR", "Failed to prepare image: ${e.message}", null)
@@ -162,7 +177,7 @@ class MainActivity : FlutterActivity() {
 
                 // Step 4: configure and submit the print job.
                 val job = CanonPrintJob()
-                job.setPrintConfiguration(CanonPrintJob.Configuration.Copies, 1)
+                job.setPrintConfiguration(CanonPrintJob.Configuration.Copies, copies)
 
                 val uri = Uri.fromFile(resizedFile)
                 if (!job.setPrintFile(uri, this@MainActivity)) {
@@ -209,8 +224,12 @@ class MainActivity : FlutterActivity() {
 
     // Scales the image to fit entirely within (targetW × targetH), preserving
     // aspect ratio. Any empty space is filled with white. EXIF orientation is
-    // applied automatically by ImageDecoder.
-    private fun resizeImageForPrinting(sourcePath: String, targetW: Int, targetH: Int): File {
+    // applied automatically by ImageDecoder. Then applies brightness, filter,
+    // and border effects in order.
+    private fun resizeImageForPrinting(
+        sourcePath: String, targetW: Int, targetH: Int,
+        filter: String, brightness: Int, bordered: Boolean
+    ): File {
         // ImageDecoder (API 28+) automatically applies EXIF orientation, so no
         // manual rotation is needed and double-rotation on Samsung devices is avoided.
         val source = ImageDecoder.createSource(File(sourcePath))
@@ -230,13 +249,65 @@ class MainActivity : FlutterActivity() {
         if (scaled !== bmp) bmp.recycle()
 
         // Composite centered onto a white canvas of the exact target dimensions.
-        val canvas = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+        var canvas = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
         val c = Canvas(canvas)
         c.drawColor(Color.WHITE)
         val left = (targetW - scaledW) / 2f
         val top  = (targetH - scaledH) / 2f
         c.drawBitmap(scaled, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
         scaled.recycle()
+
+        // ── Brightness ────────────────────────────────────────────────────────
+        if (brightness != 0) {
+            val scale2 = 1f + brightness * 0.12f
+            val brightMatrix = ColorMatrix().apply {
+                setScale(scale2, scale2, scale2, 1f)
+            }
+            val paint = Paint().apply { colorFilter = ColorMatrixColorFilter(brightMatrix) }
+            val adjusted = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+            Canvas(adjusted).drawBitmap(canvas, 0f, 0f, paint)
+            canvas.recycle()
+            canvas = adjusted
+        }
+
+        // ── Filter ────────────────────────────────────────────────────────────
+        if (filter != "Off") {
+            val colorMatrix = when (filter) {
+                "B&W" -> ColorMatrix().apply { setSaturation(0f) }
+                "Sepia" -> ColorMatrix().apply {
+                    set(floatArrayOf(
+                        0.393f, 0.769f, 0.189f, 0f, 0f,
+                        0.349f, 0.686f, 0.168f, 0f, 0f,
+                        0.272f, 0.534f, 0.131f, 0f, 0f,
+                        0f,     0f,     0f,     1f, 0f
+                    ))
+                }
+                "Vivid" -> ColorMatrix().apply { setSaturation(1.6f) }
+                else -> null
+            }
+            if (colorMatrix != null) {
+                val paint = Paint().apply { colorFilter = ColorMatrixColorFilter(colorMatrix) }
+                val filtered = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                Canvas(filtered).drawBitmap(canvas, 0f, 0f, paint)
+                canvas.recycle()
+                canvas = filtered
+            }
+        }
+
+        // ── Bordered ─────────────────────────────────────────────────────────
+        if (bordered) {
+            val borderThickness = (targetW * 0.04f).toInt()
+            val innerW = targetW - borderThickness * 2
+            val innerH = targetH - borderThickness * 2
+            val inner = Bitmap.createScaledBitmap(canvas, innerW, innerH, true)
+            val borderedBmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+            val bc = Canvas(borderedBmp)
+            bc.drawColor(Color.WHITE)
+            bc.drawBitmap(inner, borderThickness.toFloat(), borderThickness.toFloat(), Paint(Paint.FILTER_BITMAP_FLAG))
+            inner.recycle()
+            canvas.recycle()
+            canvas = borderedBmp
+        }
 
         val outFile = File(cacheDir, "selphy_print_${System.currentTimeMillis()}.jpg")
         FileOutputStream(outFile).use { fos ->
