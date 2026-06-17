@@ -1,9 +1,10 @@
 package com.mindoula.canon_selphy_print
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
-import android.media.ExifInterface
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ImageDecoder
+import android.graphics.Paint
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -206,80 +207,42 @@ class MainActivity : FlutterActivity() {
 
     // ── Image resize ──────────────────────────────────────────────────────────
 
-    // Resizes the image at sourcePath to exactly (targetW × targetH), preserving
-    // aspect ratio by center-cropping, and correcting EXIF orientation.
+    // Scales the image to fit entirely within (targetW × targetH), preserving
+    // aspect ratio. Any empty space is filled with white. EXIF orientation is
+    // applied automatically by ImageDecoder.
     private fun resizeImageForPrinting(sourcePath: String, targetW: Int, targetH: Int): File {
-        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(sourcePath, opts)
-
-        // Read EXIF rotation before decoding the full bitmap.
-        val exif = ExifInterface(sourcePath)
-        val rotation = when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-            ExifInterface.ORIENTATION_ROTATE_90  -> 90f
-            ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-            ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-            else                                  -> 0f
+        // ImageDecoder (API 28+) automatically applies EXIF orientation, so no
+        // manual rotation is needed and double-rotation on Samsung devices is avoided.
+        val source = ImageDecoder.createSource(File(sourcePath))
+        var bmp = ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
         }
 
-        // Decode with sub-sampling to avoid OOM — find the largest power-of-2 sample
-        // that keeps both dimensions above the target.
-        var sampleSize = 1
-        var w = opts.outWidth
-        var h = opts.outHeight
-        while (w / 2 >= targetW * 2 && h / 2 >= targetH * 2) {
-            sampleSize *= 2
-            w /= 2
-            h /= 2
-        }
-
-        val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-        var bmp = BitmapFactory.decodeFile(sourcePath, decodeOpts)
-            ?: throw IllegalArgumentException("Cannot decode image at $sourcePath")
-
-        // Apply EXIF rotation.
-        if (rotation != 0f) {
-            val matrix = Matrix().apply { postRotate(rotation) }
-            val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
-            if (rotated !== bmp) bmp.recycle()
-            bmp = rotated
-        }
-
-        // Center-crop to the target aspect ratio, then scale to exact size.
         val srcW = bmp.width.toFloat()
         val srcH = bmp.height.toFloat()
-        val targetRatio = targetW.toFloat() / targetH
-        val srcRatio = srcW / srcH
 
-        val cropW: Int
-        val cropH: Int
-        val cropX: Int
-        val cropY: Int
-        if (srcRatio > targetRatio) {
-            // Source is wider — crop sides
-            cropH = bmp.height
-            cropW = (bmp.height * targetRatio).toInt()
-            cropX = (bmp.width - cropW) / 2
-            cropY = 0
-        } else {
-            // Source is taller — crop top/bottom
-            cropW = bmp.width
-            cropH = (bmp.width / targetRatio).toInt()
-            cropX = 0
-            cropY = (bmp.height - cropH) / 2
-        }
+        // Scale to fit entirely within the target (letterbox — no cropping).
+        val scale = minOf(targetW / srcW, targetH / srcH)
+        val scaledW = (srcW * scale).toInt()
+        val scaledH = (srcH * scale).toInt()
 
-        val cropped = Bitmap.createBitmap(bmp, cropX, cropY, cropW, cropH)
-        if (cropped !== bmp) bmp.recycle()
+        val scaled = Bitmap.createScaledBitmap(bmp, scaledW, scaledH, true)
+        if (scaled !== bmp) bmp.recycle()
 
-        val scaled = Bitmap.createScaledBitmap(cropped, targetW, targetH, true)
-        if (scaled !== cropped) cropped.recycle()
+        // Composite centered onto a white canvas of the exact target dimensions.
+        val canvas = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+        val c = Canvas(canvas)
+        c.drawColor(Color.WHITE)
+        val left = (targetW - scaledW) / 2f
+        val top  = (targetH - scaledH) / 2f
+        c.drawBitmap(scaled, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
+        scaled.recycle()
 
-        // Save as JPEG to a temp file.
         val outFile = File(cacheDir, "selphy_print_${System.currentTimeMillis()}.jpg")
         FileOutputStream(outFile).use { fos ->
-            scaled.compress(Bitmap.CompressFormat.JPEG, 95, fos)
+            canvas.compress(Bitmap.CompressFormat.JPEG, 95, fos)
         }
-        scaled.recycle()
+        canvas.recycle()
 
         return outFile
     }
