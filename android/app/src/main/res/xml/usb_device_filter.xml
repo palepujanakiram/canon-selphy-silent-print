@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Canon Selphy CP1500: Vendor ID 0x04a9 (Canon) -->
+<resources>
+    <usb-device vendor-id="1193" />
+</resources>
