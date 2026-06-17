@@ -2,10 +2,65 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const SelphyPrintApp());
 }
+
+// ── PrintSettings ─────────────────────────────────────────────────────────────
+
+class PrintSettings {
+  final int copies;
+  final String filter;
+  final int brightness;
+  final bool bordered;
+
+  static const _filterOptions = ['Off', 'Vivid', 'B&W', 'Sepia'];
+
+  const PrintSettings({
+    this.copies = 1,
+    this.filter = 'Off',
+    this.brightness = 0,
+    this.bordered = false,
+  });
+
+  Map<String, dynamic> toMap() => {
+        'copies': copies,
+        'filter': filter,
+        'brightness': brightness,
+        'bordered': bordered,
+      };
+
+  PrintSettings copyWith({
+    int? copies,
+    String? filter,
+    int? brightness,
+    bool? bordered,
+  }) =>
+      PrintSettings(
+        copies: copies ?? this.copies,
+        filter: filter ?? this.filter,
+        brightness: brightness ?? this.brightness,
+        bordered: bordered ?? this.bordered,
+      );
+
+  static PrintSettings fromPrefs(SharedPreferences prefs) => PrintSettings(
+        copies: prefs.getInt('ps_copies') ?? 1,
+        filter: prefs.getString('ps_filter') ?? 'Off',
+        brightness: prefs.getInt('ps_brightness') ?? 0,
+        bordered: prefs.getBool('ps_bordered') ?? false,
+      );
+
+  Future<void> saveToPrefs(SharedPreferences prefs) async {
+    await prefs.setInt('ps_copies', copies);
+    await prefs.setString('ps_filter', filter);
+    await prefs.setInt('ps_brightness', brightness);
+    await prefs.setBool('ps_bordered', bordered);
+  }
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
 
 class SelphyPrintApp extends StatelessWidget {
   const SelphyPrintApp({super.key});
@@ -23,6 +78,8 @@ class SelphyPrintApp extends StatelessWidget {
   }
 }
 
+// ── PrintScreen ───────────────────────────────────────────────────────────────
+
 class PrintScreen extends StatefulWidget {
   const PrintScreen({super.key});
 
@@ -38,11 +95,18 @@ class _PrintScreenState extends State<PrintScreen> {
   String _status = '';
   bool _printing = false;
   bool _printerReady = false;
+  PrintSettings _settings = const PrintSettings();
 
   @override
   void initState() {
     super.initState();
+    _loadSettings();
     WidgetsBinding.instance.addPostFrameCallback((_) => _requestUsbPermission());
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() => _settings = PrintSettings.fromPrefs(prefs));
   }
 
   Future<void> _requestUsbPermission() async {
@@ -83,7 +147,10 @@ class _PrintScreenState extends State<PrintScreen> {
     try {
       final result = await _channel.invokeMethod<String>(
         'print',
-        {'filePath': _image!.path},
+        {
+          'filePath': _image!.path,
+          ..._settings.toMap(),
+        },
       );
       _setStatus(result ?? 'Done');
     } on PlatformException catch (e) {
@@ -95,13 +162,37 @@ class _PrintScreenState extends State<PrintScreen> {
 
   void _setStatus(String msg) => setState(() => _status = msg);
 
+  void _openSettings() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _SettingsSheet(
+        initial: _settings,
+        onSave: (updated) async {
+          final prefs = await SharedPreferences.getInstance();
+          await updated.saveToPrefs(prefs);
+          setState(() => _settings = updated);
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final copiesLabel = _settings.copies == 1 ? '1 copy' : '${_settings.copies} copies';
     return Scaffold(
       appBar: AppBar(
         title: const Text('Selphy CP1500 — USB Print'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Print settings',
+            onPressed: _openSettings,
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Re-check printer',
@@ -193,23 +284,179 @@ class _PrintScreenState extends State<PrintScreen> {
                     ),
             ),
             const SizedBox(height: 16),
-            FilledButton.icon(
-              icon: _printing
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Icon(Icons.print),
-              label: Text(_printing ? 'Printing…' : 'Print'),
-              onPressed: (_printing || !_printerReady) ? null : _print,
-              style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-              ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                FilledButton.icon(
+                  icon: _printing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.print),
+                  label: Text(_printing ? 'Printing…' : 'Print'),
+                  onPressed: (_printing || !_printerReady) ? null : _print,
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  copiesLabel,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                ),
+              ],
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ── Settings bottom sheet ─────────────────────────────────────────────────────
+
+class _SettingsSheet extends StatefulWidget {
+  final PrintSettings initial;
+  final Future<void> Function(PrintSettings) onSave;
+
+  const _SettingsSheet({required this.initial, required this.onSave});
+
+  @override
+  State<_SettingsSheet> createState() => _SettingsSheetState();
+}
+
+class _SettingsSheetState extends State<_SettingsSheet> {
+  late PrintSettings _draft;
+
+  @override
+  void initState() {
+    super.initState();
+    _draft = widget.initial;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 24,
+        right: 24,
+        top: 24,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Print Settings',
+            style: Theme.of(context).textTheme.titleLarge,
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 24),
+
+          // Copies
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Copies', style: TextStyle(fontSize: 16)),
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.remove),
+                    onPressed: _draft.copies > 1
+                        ? () => setState(() => _draft = _draft.copyWith(copies: _draft.copies - 1))
+                        : null,
+                  ),
+                  Text(
+                    '${_draft.copies}',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.add),
+                    onPressed: _draft.copies < 5
+                        ? () => setState(() => _draft = _draft.copyWith(copies: _draft.copies + 1))
+                        : null,
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Borders
+          Align(
+            alignment: Alignment.centerLeft,
+            child: const Text('Borders', style: TextStyle(fontSize: 16)),
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(value: false, label: Text('Borderless')),
+              ButtonSegment(value: true, label: Text('Bordered')),
+            ],
+            selected: {_draft.bordered},
+            onSelectionChanged: (v) => setState(() => _draft = _draft.copyWith(bordered: v.first)),
+          ),
+          const SizedBox(height: 16),
+
+          // Filter
+          Align(
+            alignment: Alignment.centerLeft,
+            child: const Text('Filter', style: TextStyle(fontSize: 16)),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            children: [
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'Off', label: Text('Off')),
+                  ButtonSegment(value: 'Vivid', label: Text('Vivid')),
+                  ButtonSegment(value: 'B&W', label: Text('B&W')),
+                  ButtonSegment(value: 'Sepia', label: Text('Sepia')),
+                ],
+                selected: {_draft.filter},
+                onSelectionChanged: (v) => setState(() => _draft = _draft.copyWith(filter: v.first)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Brightness
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Brightness', style: TextStyle(fontSize: 16)),
+              Text(
+                _draft.brightness == 0
+                    ? '0'
+                    : (_draft.brightness > 0 ? '+${_draft.brightness}' : '${_draft.brightness}'),
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              ),
+            ],
+          ),
+          Slider(
+            min: -3,
+            max: 3,
+            divisions: 6,
+            value: _draft.brightness.toDouble(),
+            label: _draft.brightness.toString(),
+            onChanged: (v) => setState(() => _draft = _draft.copyWith(brightness: v.round())),
+          ),
+          const SizedBox(height: 24),
+
+          // Save
+          FilledButton(
+            onPressed: () async {
+              await widget.onSave(_draft);
+              if (context.mounted) Navigator.of(context).pop();
+            },
+            child: const Text('Save'),
+          ),
+        ],
       ),
     );
   }
