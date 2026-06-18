@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -260,10 +261,15 @@ class _PreviewScreenState extends State<PreviewScreen> {
   String _status = '';
   bool _printerReady = false;
   bool _printing = false;
+  late final Future<ui.Image> _imageSizeFuture;
 
   @override
   void initState() {
     super.initState();
+    // Decode image dimensions (EXIF-corrected) to detect landscape vs portrait.
+    _imageSizeFuture = widget.image
+        .readAsBytes()
+        .then((bytes) => decodeImageFromList(bytes));
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkPrinter());
   }
 
@@ -348,44 +354,62 @@ class _PreviewScreenState extends State<PreviewScreen> {
   Widget _buildPreview() {
     final s = widget.settings;
     final colorFilter = _buildColorFilter();
+    final paperIsLandscape = s.paperAspectRatio > 1;
 
-    // The raw image widget, optionally wrapped in a color filter.
-    Widget photo = Image.file(
-      widget.image,
-      fit: s.bordered ? BoxFit.contain : BoxFit.cover,
-    );
-    if (colorFilter != null) {
-      photo = ColorFiltered(colorFilter: colorFilter, child: photo);
-    }
+    return FutureBuilder<ui.Image>(
+      future: _imageSizeFuture,
+      builder: (context, snapshot) {
+        // Show a placeholder until dimensions are known.
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final info = snapshot.data!;
+        final srcIsLandscape = info.width > info.height;
+        // Rotate 90° when source and paper orientations differ.
+        final needsRotation = srcIsLandscape != paperIsLandscape;
 
-    // Bordered: shrink the image inside a white frame.
-    if (s.bordered) {
-      photo = Container(
-        color: Colors.white,
-        padding: const EdgeInsets.all(12),
-        child: photo,
-      );
-    }
+        // Base image — BoxFit.cover fills whatever space it's given.
+        Widget photo = Image.file(widget.image, fit: BoxFit.cover);
 
-    // Constrain to the paper's aspect ratio with a subtle paper shadow.
-    return Center(
-      child: AspectRatio(
-        aspectRatio: s.paperAspectRatio,
-        child: Container(
-          decoration: BoxDecoration(
+        if (needsRotation) {
+          // RotatedBox swaps layout dimensions so BoxFit.cover fills correctly.
+          photo = RotatedBox(quarterTurns: 1, child: photo);
+        }
+
+        if (colorFilter != null) {
+          photo = ColorFiltered(colorFilter: colorFilter, child: photo);
+        }
+
+        // Bordered: inset the image and show white margins.
+        if (s.bordered) {
+          photo = Container(
             color: Colors.white,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.25),
-                blurRadius: 12,
-                offset: const Offset(0, 4),
+            padding: const EdgeInsets.all(12),
+            child: photo,
+          );
+        }
+
+        // Constrain to the paper's aspect ratio with a paper-like shadow.
+        return Center(
+          child: AspectRatio(
+            aspectRatio: s.paperAspectRatio,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
-            ],
+              clipBehavior: Clip.antiAlias,
+              child: photo,
+            ),
           ),
-          clipBehavior: Clip.antiAlias,
-          child: photo,
-        ),
-      ),
+        );
+      },
     );
   }
 

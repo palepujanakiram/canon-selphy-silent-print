@@ -226,6 +226,17 @@ class MainActivity : FlutterActivity() {
             decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
         }
 
+        // If source and paper orientations differ (e.g. landscape photo on portrait
+        // paper), rotate the bitmap 90° so it fills the paper naturally.
+        val srcIsLandscape = bmp.width > bmp.height
+        val paperIsLandscape = targetW > targetH
+        if (srcIsLandscape != paperIsLandscape) {
+            val matrix = android.graphics.Matrix().apply { postRotate(90f) }
+            val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+            bmp.recycle()
+            bmp = rotated
+        }
+
         val srcW = bmp.width.toFloat()
         val srcH = bmp.height.toFloat()
 
