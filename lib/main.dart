@@ -162,14 +162,16 @@ class _PhotoPickScreenState extends State<PhotoPickScreen> {
 
   String get _settingsSummary {
     final s = _settings;
-    final parts = [
+    final brightnessLabel = s.brightness == 0
+        ? '0'
+        : '${s.brightness > 0 ? '+' : ''}${s.brightness}';
+    return [
       '${s.copies == 1 ? '1 copy' : '${s.copies} copies'}',
       s.paperSize,
       s.bordered ? 'Bordered' : 'Borderless',
-      if (s.filter != 'Off') s.filter,
-      if (s.brightness != 0) '${s.brightness > 0 ? '+' : ''}${s.brightness} brightness',
-    ];
-    return parts.join(' · ');
+      'Filter: ${s.filter}',
+      'Brightness: $brightnessLabel',
+    ].join(' · ');
   }
 
   @override
