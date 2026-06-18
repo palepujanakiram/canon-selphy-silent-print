@@ -176,7 +176,8 @@ class _PhotoPickScreenState extends State<PhotoPickScreen> {
           ),
         ],
       ),
-      body: Padding(
+      body: SafeArea(
+        child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -236,6 +237,7 @@ class _PhotoPickScreenState extends State<PhotoPickScreen> {
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
           ],
+        ),
         ),
       ),
     );
@@ -409,7 +411,8 @@ class _PreviewScreenState extends State<PreviewScreen> {
           ),
         ],
       ),
-      body: Padding(
+      body: SafeArea(
+        child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -476,6 +479,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
             ),
           ],
         ),
+        ),
       ),
     );
   }
@@ -509,7 +513,9 @@ class _SettingsSheetState extends State<_SettingsSheet> {
         left: 24,
         right: 24,
         top: 24,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+        bottom: MediaQuery.of(context).viewInsets.bottom +
+            MediaQuery.of(context).padding.bottom +
+            24,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
