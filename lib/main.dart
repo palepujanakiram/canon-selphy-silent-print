@@ -160,22 +160,24 @@ class _PhotoPickScreenState extends State<PhotoPickScreen> {
     );
   }
 
+  String get _settingsSummary {
+    final s = _settings;
+    final parts = [
+      '${s.copies == 1 ? '1 copy' : '${s.copies} copies'}',
+      s.paperSize,
+      s.bordered ? 'Bordered' : 'Borderless',
+      if (s.filter != 'Off') s.filter,
+      if (s.brightness != 0) '${s.brightness > 0 ? '+' : ''}${s.brightness} brightness',
+    ];
+    return parts.join(' · ');
+  }
+
   @override
   Widget build(BuildContext context) {
-    final subtitle =
-        '${_settings.copies == 1 ? '1 copy' : '${_settings.copies} copies'} · ${_settings.paperSize}';
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Selphy CP1500 — USB Print'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Print settings',
-            onPressed: _openSettings,
-          ),
-        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -223,6 +225,22 @@ class _PhotoPickScreenState extends State<PhotoPickScreen> {
                     ),
             ),
             const SizedBox(height: 16),
+            // Print Settings button + summary
+            OutlinedButton.icon(
+              icon: const Icon(Icons.settings),
+              label: const Text('Print Settings'),
+              onPressed: _openSettings,
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              _settingsSummary,
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 12),
             FilledButton.icon(
               icon: const Icon(Icons.preview),
               label: const Text('Preview'),
@@ -230,12 +248,6 @@ class _PhotoPickScreenState extends State<PhotoPickScreen> {
               style: FilledButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 16),
               ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              subtitle,
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
           ],
         ),
