@@ -20,8 +20,10 @@ class PrintSettings {
   final String filter;
   final int brightness;
   final bool bordered;
+  final String connection; // 'USB' or 'WiFi'
 
   static const paperSizes = ['4x6', 'L-size', 'Card'];
+  static const connections = ['USB', 'WiFi'];
 
   const PrintSettings({
     this.copies = 1,
@@ -29,7 +31,11 @@ class PrintSettings {
     this.filter = 'Off',
     this.brightness = 0,
     this.bordered = false,
+    this.connection = 'USB',
   });
+
+  // Transport identifier passed to the native print method.
+  String get transport => connection == 'WiFi' ? 'wifi' : 'usb';
 
   Map<String, dynamic> toMap() => {
         'copies': copies,
@@ -37,6 +43,7 @@ class PrintSettings {
         'filter': filter,
         'brightness': brightness,
         'bordered': bordered,
+        'transport': transport,
       };
 
   PrintSettings copyWith({
@@ -45,6 +52,7 @@ class PrintSettings {
     String? filter,
     int? brightness,
     bool? bordered,
+    String? connection,
   }) =>
       PrintSettings(
         copies: copies ?? this.copies,
@@ -52,6 +60,7 @@ class PrintSettings {
         filter: filter ?? this.filter,
         brightness: brightness ?? this.brightness,
         bordered: bordered ?? this.bordered,
+        connection: connection ?? this.connection,
       );
 
   static PrintSettings fromPrefs(SharedPreferences prefs) => PrintSettings(
@@ -60,6 +69,7 @@ class PrintSettings {
         filter: prefs.getString('ps_filter') ?? 'Off',
         brightness: prefs.getInt('ps_brightness') ?? 0,
         bordered: prefs.getBool('ps_bordered') ?? false,
+        connection: prefs.getString('ps_connection') ?? 'USB',
       );
 
   Future<void> saveToPrefs(SharedPreferences prefs) async {
@@ -68,6 +78,7 @@ class PrintSettings {
     await prefs.setString('ps_filter', filter);
     await prefs.setInt('ps_brightness', brightness);
     await prefs.setBool('ps_bordered', bordered);
+    await prefs.setString('ps_connection', connection);
   }
 
   // Aspect ratio (width / height) for the chosen paper size.
@@ -166,7 +177,8 @@ class _PhotoPickScreenState extends State<PhotoPickScreen> {
         ? '0'
         : '${s.brightness > 0 ? '+' : ''}${s.brightness}';
     return [
-      '${s.copies == 1 ? '1 copy' : '${s.copies} copies'}',
+      s.connection,
+      s.copies == 1 ? '1 copy' : '${s.copies} copies',
       s.paperSize,
       s.bordered ? 'Bordered' : 'Borderless',
       'Filter: ${s.filter}',
@@ -178,7 +190,7 @@ class _PhotoPickScreenState extends State<PhotoPickScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Selphy CP1500 — USB Print'),
+        title: const Text('Selphy CP1500 — Print'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
       ),
       body: SafeArea(
@@ -288,9 +300,16 @@ class _PreviewScreenState extends State<PreviewScreen> {
   }
 
   Future<void> _checkPrinter() async {
-    setState(() => _status = 'Looking for printer…');
+    final isWifi = widget.settings.connection == 'WiFi';
+    setState(() {
+      _printerReady = false;
+      _status = isWifi ? 'Searching for printer on Wi-Fi…' : 'Looking for USB printer…';
+    });
     try {
-      final msg = await _channel.invokeMethod<String>('requestPermission');
+      // USB requests device permission; Wi-Fi discovers and auto-connects to
+      // the first printer found on the network.
+      final method = isWifi ? 'discoverWifi' : 'requestPermission';
+      final msg = await _channel.invokeMethod<String>(method);
       setState(() {
         _printerReady = true;
         _status = msg ?? 'Printer ready';
@@ -382,11 +401,13 @@ class _PreviewScreenState extends State<PreviewScreen> {
         // Rotate 90° when source and paper orientations differ.
         final needsRotation = srcIsLandscape != paperIsLandscape;
 
-        // Base image — BoxFit.cover fills whatever space it's given.
-        Widget photo = Image.file(widget.image, fit: BoxFit.cover);
+        // BoxFit.contain shows the WHOLE photo (no cropping), matching the
+        // printer output which fits the image inside the paper's printable area.
+        Widget photo = Image.file(widget.image, fit: BoxFit.contain);
 
         if (needsRotation) {
-          // RotatedBox swaps layout dimensions so BoxFit.cover fills correctly.
+          // RotatedBox swaps layout dimensions so the contained image is
+          // oriented to fill the paper as much as possible.
           photo = RotatedBox(quarterTurns: 1, child: photo);
         }
 
@@ -394,14 +415,13 @@ class _PreviewScreenState extends State<PreviewScreen> {
           photo = ColorFiltered(colorFilter: colorFilter, child: photo);
         }
 
-        // Bordered: inset the image and show white margins.
-        if (s.bordered) {
-          photo = Container(
-            color: Colors.white,
-            padding: const EdgeInsets.all(12),
-            child: photo,
-          );
-        }
+        // White safety margin around the photo, matching the printer output:
+        // a small even inset for borderless, a larger one for bordered.
+        photo = Container(
+          color: Colors.white,
+          padding: EdgeInsets.all(s.bordered ? 16 : 7),
+          child: photo,
+        );
 
         // Constrain to the paper's aspect ratio with a paper-like shadow.
         return Center(
@@ -431,7 +451,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
   Widget build(BuildContext context) {
     final s = widget.settings;
     final subtitle =
-        '${s.copies == 1 ? '1 copy' : '${s.copies} copies'} · ${s.paperSize}'
+        '${s.connection} · ${s.copies == 1 ? '1 copy' : '${s.copies} copies'} · ${s.paperSize}'
         '${s.bordered ? ' · Bordered' : ''}'
         '${s.filter != 'Off' ? ' · ${s.filter}' : ''}'
         '${s.brightness != 0 ? ' · ${s.brightness > 0 ? '+' : ''}${s.brightness}' : ''}';
@@ -563,6 +583,31 @@ class _SettingsSheetState extends State<_SettingsSheet> {
               style: Theme.of(context).textTheme.titleLarge,
               textAlign: TextAlign.center),
           const SizedBox(height: 24),
+
+          // Connection
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text('Connection', style: TextStyle(fontSize: 16)),
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: 'USB',
+                label: Text('USB'),
+                icon: Icon(Icons.usb),
+              ),
+              ButtonSegment(
+                value: 'WiFi',
+                label: Text('Wi-Fi'),
+                icon: Icon(Icons.wifi),
+              ),
+            ],
+            selected: {_draft.connection},
+            onSelectionChanged: (v) =>
+                setState(() => _draft = _draft.copyWith(connection: v.first)),
+          ),
+          const SizedBox(height: 16),
 
           // Copies
           Row(

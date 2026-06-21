@@ -7,7 +7,15 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28"/>
-    <uses-feature android:name="android.hardware.usb.host" android:required="true"/>
+    <!-- WiFi printing: discovery + network access. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Required by ConnectivityManager.requestNetwork() to bind to the printer's Wi-Fi. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+    <!-- USB host is optional so the app still installs on WiFi-only devices. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false"/>
 
     <application
         android:label="canon_selphy_print"

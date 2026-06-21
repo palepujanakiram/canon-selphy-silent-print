@@ -7,21 +7,36 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageDecoder
 import android.graphics.Paint
+import android.graphics.Point
+import android.graphics.Rect
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+// ── USB SDK ───────────────────────────────────────────────────────────────────
 import jp.co.canon.android.print.selphy.usbsdk.CanonPermissionRequestCallback
 import jp.co.canon.android.print.selphy.usbsdk.CanonPreparationCallback
-import jp.co.canon.android.print.selphy.usbsdk.CanonPrintCallback
-import jp.co.canon.android.print.selphy.usbsdk.CanonPrintDevice
-import jp.co.canon.android.print.selphy.usbsdk.CanonPrintJob
-import jp.co.canon.android.print.selphy.usbsdk.CanonPrintSizeInfo
-import jp.co.canon.android.print.selphy.usbsdk.CanonPrinterAccessoryInfo
-import jp.co.canon.android.print.selphy.usbsdk.CanonPrinterStatus
+import jp.co.canon.android.print.selphy.usbsdk.CanonPrintCallback as UsbPrintCallback
+import jp.co.canon.android.print.selphy.usbsdk.CanonPrintDevice as UsbPrintDevice
+import jp.co.canon.android.print.selphy.usbsdk.CanonPrintJob as UsbPrintJob
+import jp.co.canon.android.print.selphy.usbsdk.CanonPrintSizeInfo as UsbPrintSizeInfo
+import jp.co.canon.android.print.selphy.usbsdk.CanonPrinterAccessoryInfo as UsbAccessoryInfo
+import jp.co.canon.android.print.selphy.usbsdk.CanonPrinterStatus as UsbPrinterStatus
 import jp.co.canon.android.print.selphy.usbsdk.CanonUsbManager
+// ── WiFi SDK ──────────────────────────────────────────────────────────────────
+import jp.co.canon.android.print.selphy.wifisdk.CanonDiscoveryCallback
+import jp.co.canon.android.print.selphy.wifisdk.CanonPrintCallback as WifiPrintCallback
+import jp.co.canon.android.print.selphy.wifisdk.CanonPrintDevice as WifiPrintDevice
+import jp.co.canon.android.print.selphy.wifisdk.CanonPrintJob as WifiPrintJob
+import jp.co.canon.android.print.selphy.wifisdk.CanonPrinterStatus as WifiPrinterStatus
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
@@ -31,25 +46,38 @@ class MainActivity : FlutterActivity() {
     private val channelName = "com.mindoula.canon_selphy_print/usb"
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Cached device so startPrint reuses the same instance that was permission-checked.
-    private var cachedDevice: CanonPrintDevice? = null
+    // Cached devices so startPrint reuses the instance that was connected/permissioned.
+    private var cachedUsbDevice: UsbPrintDevice? = null
+    private var cachedWifiDevice: WifiPrintDevice? = null
+
+    // Wi-Fi network binding (see bindToWifiNetwork).
+    private var connectivityManager: ConnectivityManager? = null
+    private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
+
+    private val logTag = "SelphyWifi"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "requestPermission" -> requestUsbPermission(result)
+                    "requestPermission" -> requestUsbPermission(result)   // USB
+                    "discoverWifi"      -> discoverWifiPrinter(result)     // WiFi
                     "print" -> {
                         val filePath = call.argument<String>("filePath")
                         if (filePath == null) result.error("INVALID_ARG", "filePath is required", null)
                         else {
+                            val transport  = call.argument<String>("transport") ?: "usb"
                             val copies     = call.argument<Int>("copies") ?: 1
                             val paperSize  = call.argument<String>("paperSize") ?: "4x6"
                             val filter     = call.argument<String>("filter") ?: "Off"
                             val brightness = call.argument<Int>("brightness") ?: 0
                             val bordered   = call.argument<Boolean>("bordered") ?: false
-                            startPrint(filePath, copies, paperSize, filter, brightness, bordered, result)
+                            if (transport == "wifi") {
+                                startWifiPrint(filePath, copies, paperSize, filter, brightness, bordered, result)
+                            } else {
+                                startUsbPrint(filePath, copies, paperSize, filter, brightness, bordered, result)
+                            }
                         }
                     }
                     else -> result.notImplemented()
@@ -57,14 +85,27 @@ class MainActivity : FlutterActivity() {
             }
     }
 
-    // ── Permission request (called on screen open) ────────────────────────────
+    override fun onDestroy() {
+        // Release the Wi-Fi binding so the rest of the system isn't forced onto
+        // the (internet-less) printer network after the app closes.
+        try {
+            connectivityManager?.bindProcessToNetwork(null)
+            wifiNetworkCallback?.let { connectivityManager?.unregisterNetworkCallback(it) }
+        } catch (e: Exception) {
+            Log.w(logTag, "Wi-Fi cleanup failed: ${e.message}")
+        }
+        wifiNetworkCallback = null
+        super.onDestroy()
+    }
+
+    // ── USB: permission request (called on screen open) ────────────────────────
 
     private fun requestUsbPermission(result: MethodChannel.Result) {
         val ctx = applicationContext
 
         fun findAndRequestPermission() {
             @Suppress("UNCHECKED_CAST")
-            val printers = CanonUsbManager.getPrinterList(ctx) as? List<CanonPrintDevice> ?: emptyList()
+            val printers = CanonUsbManager.getPrinterList(ctx) as? List<UsbPrintDevice> ?: emptyList()
 
             if (printers.isEmpty()) {
                 mainHandler.post {
@@ -76,7 +117,7 @@ class MainActivity : FlutterActivity() {
             val device = printers[0]
 
             if (CanonUsbManager.hasPermission(ctx, device)) {
-                cachedDevice = device
+                cachedUsbDevice = device
                 mainHandler.post { result.success("Printer ready: ${device.printerName}") }
                 return
             }
@@ -84,10 +125,10 @@ class MainActivity : FlutterActivity() {
             val requested = CanonUsbManager.requestPermission(
                 ctx, device,
                 object : CanonPermissionRequestCallback() {
-                    override fun onReceivePermissionGranted(dev: CanonPrintDevice, granted: Boolean) {
+                    override fun onReceivePermissionGranted(dev: UsbPrintDevice, granted: Boolean) {
                         mainHandler.post {
                             if (granted) {
-                                cachedDevice = dev
+                                cachedUsbDevice = dev
                                 result.success("Printer ready: ${dev.printerName}")
                             } else {
                                 result.error(
@@ -126,9 +167,117 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // ── Print ─────────────────────────────────────────────────────────────────
+    // ── WiFi: network binding ───────────────────────────────────────────────────
 
-    private fun startPrint(
+    // The printer's Direct Connection AP has no internet, so Android keeps the
+    // default network on cellular and routes the SDK's discovery/print sockets
+    // there — never reaching the printer. Binding the process to the Wi-Fi
+    // network forces all traffic over Wi-Fi. Invokes [onResult] once.
+    private fun bindToWifiNetwork(onResult: (Boolean) -> Unit) {
+        val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        connectivityManager = cm
+
+        // Already bound to a Wi-Fi network? Reuse it.
+        val bound = cm.boundNetworkForProcess
+        if (bound != null) {
+            val caps = cm.getNetworkCapabilities(bound)
+            if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                Log.i(logTag, "Already bound to a Wi-Fi network")
+                onResult(true)
+                return
+            }
+        }
+
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .build()
+
+        val resolved = AtomicBoolean(false)
+        val timeout = Runnable {
+            if (resolved.compareAndSet(false, true)) {
+                Log.w(logTag, "Wi-Fi bind timed out")
+                onResult(false)
+            }
+        }
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val ok = cm.bindProcessToNetwork(network)
+                Log.i(logTag, "Bound process to Wi-Fi network=$network ok=$ok")
+                if (resolved.compareAndSet(false, true)) {
+                    mainHandler.removeCallbacks(timeout)
+                    mainHandler.post { onResult(true) }
+                }
+            }
+
+            override fun onUnavailable() {
+                if (resolved.compareAndSet(false, true)) {
+                    mainHandler.removeCallbacks(timeout)
+                    mainHandler.post { onResult(false) }
+                }
+            }
+        }
+        wifiNetworkCallback = callback
+        cm.requestNetwork(request, callback)
+        mainHandler.postDelayed(timeout, 8000)
+    }
+
+    // ── WiFi: discover and auto-connect to the first printer found ──────────────
+
+    private fun discoverWifiPrinter(result: MethodChannel.Result) {
+        // Ensure traffic is routed over Wi-Fi before discovering.
+        bindToWifiNetwork { bound ->
+            if (!bound) {
+                result.error(
+                    "WIFI_BIND_FAILED",
+                    "Could not route to the printer's Wi-Fi. Make sure your phone is connected to the printer's Wi-Fi network.",
+                    null
+                )
+                return@bindToWifiNetwork
+            }
+            startWifiDiscovery(result)
+        }
+    }
+
+    private fun startWifiDiscovery(result: MethodChannel.Result) {
+        val resolved = AtomicBoolean(false)
+
+        val started = WifiPrintDevice.startDiscovery(this, object : CanonDiscoveryCallback() {
+            override fun onFoundPrinter(device: WifiPrintDevice) {
+                // Auto-connect to the first printer discovered on the network.
+                if (resolved.compareAndSet(false, true)) {
+                    cachedWifiDevice = device
+                    WifiPrintDevice.stopDiscovery()
+                    mainHandler.post {
+                        result.success("Printer ready: ${device.printerName} (${device.printerIpAddress})")
+                    }
+                }
+            }
+
+            override fun onFinished(found: Boolean) {
+                // Discovery completed without any printer being picked up.
+                if (resolved.compareAndSet(false, true)) {
+                    mainHandler.post {
+                        result.error(
+                            "NO_PRINTER",
+                            "No Canon Selphy printer found on Wi-Fi. Ensure the printer and phone are on the same network.",
+                            null
+                        )
+                    }
+                }
+            }
+        })
+
+        if (!started && resolved.compareAndSet(false, true)) {
+            mainHandler.post {
+                result.error("DISCOVERY_FAILED", "Could not start Wi-Fi discovery. Check Wi-Fi is enabled.", null)
+            }
+        }
+    }
+
+    // ── USB print ───────────────────────────────────────────────────────────────
+
+    private fun startUsbPrint(
         filePath: String,
         copies: Int,
         paperSize: String,
@@ -138,7 +287,7 @@ class MainActivity : FlutterActivity() {
         result: MethodChannel.Result
     ) {
         val ctx = applicationContext
-        val device = cachedDevice
+        val device = cachedUsbDevice
 
         if (device == null || !CanonUsbManager.hasPermission(ctx, device)) {
             mainHandler.post {
@@ -147,18 +296,10 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        // Resolve the user-selected paper size to the SDK cassette type and JPEG dimensions.
-        val paperType = when (paperSize) {
-            "L-size" -> CanonPrinterAccessoryInfo.PaperCassetteStatus.L
-            "Card"   -> CanonPrinterAccessoryInfo.PaperCassetteStatus.Card
-            else     -> CanonPrinterAccessoryInfo.PaperCassetteStatus.Post  // default: 4x6
-        }
-        val sizeInfo = CanonPrintSizeInfo.getPrintSizeInfo(paperType)
-        val required = sizeInfo.printableJpegSize  // Point: x=width, y=height
+        val sizeInfo = sizeInfoFor(paperSize)
 
-        // Prepare the image at the required dimensions.
         val resizedFile = try {
-            resizeImageForPrinting(filePath, required.x, required.y, filter, brightness, bordered)
+            resizeImageForPrinting(filePath, sizeInfo.printableJpegSize, sizeInfo.printableArea, filter, brightness, bordered)
         } catch (e: Exception) {
             mainHandler.post {
                 result.error("IMAGE_ERROR", "Failed to prepare image: ${e.message}", null)
@@ -166,9 +307,8 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        // Configure and submit the print job.
-        val job = CanonPrintJob()
-        job.setPrintConfiguration(CanonPrintJob.Configuration.Copies, copies)
+        val job = UsbPrintJob()
+        job.setPrintConfiguration(UsbPrintJob.Configuration.Copies, copies)
 
         val uri = Uri.fromFile(resizedFile)
         if (!job.setPrintFile(uri, this)) {
@@ -181,8 +321,8 @@ class MainActivity : FlutterActivity() {
 
         val resolved = AtomicBoolean(false)
 
-        val started = device.print(job, object : CanonPrintCallback() {
-            override fun onChangedJobStatus(job: CanonPrintJob) {
+        val started = device.print(job, object : UsbPrintCallback() {
+            override fun onChangedJobStatus(job: UsbPrintJob) {
                 if (job.isFinished && resolved.compareAndSet(false, true)) {
                     resizedFile.delete()
                     val statusMsg = job.status.toString()
@@ -196,7 +336,7 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-            override fun onChangedPrinterStatus(job: CanonPrintJob, status: CanonPrinterStatus) {
+            override fun onChangedPrinterStatus(job: UsbPrintJob, status: UsbPrinterStatus) {
                 // no-op
             }
         })
@@ -209,16 +349,106 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    // ── WiFi print ───────────────────────────────────────────────────────────────
+
+    private fun startWifiPrint(
+        filePath: String,
+        copies: Int,
+        paperSize: String,
+        filter: String,
+        brightness: Int,
+        bordered: Boolean,
+        result: MethodChannel.Result
+    ) {
+        val device = cachedWifiDevice
+
+        if (device == null) {
+            mainHandler.post {
+                result.error("NO_PRINTER", "Printer not ready. Tap the refresh button to search.", null)
+            }
+            return
+        }
+
+        val sizeInfo = sizeInfoFor(paperSize)
+
+        val resizedFile = try {
+            resizeImageForPrinting(filePath, sizeInfo.printableJpegSize, sizeInfo.printableArea, filter, brightness, bordered)
+        } catch (e: Exception) {
+            mainHandler.post {
+                result.error("IMAGE_ERROR", "Failed to prepare image: ${e.message}", null)
+            }
+            return
+        }
+
+        val job = WifiPrintJob()
+        job.setPrintConfiguration(WifiPrintJob.Configuration.Copies, copies)
+
+        // WiFi setPrintFile returns void (unlike USB which returns a Boolean).
+        val uri = Uri.fromFile(resizedFile)
+        job.setPrintFile(uri, this)
+
+        val resolved = AtomicBoolean(false)
+
+        // WiFi print() takes a Context argument in addition to job + callback.
+        val started = device.print(job, this, object : WifiPrintCallback() {
+            override fun onChangedJobStatus(job: WifiPrintJob) {
+                if (job.isFinished && resolved.compareAndSet(false, true)) {
+                    resizedFile.delete()
+                    val statusMsg = job.status.toString()
+                    mainHandler.post {
+                        if (statusMsg.contains("Error", ignoreCase = true)) {
+                            result.error("PRINT_ERROR", "Print failed: $statusMsg", null)
+                        } else {
+                            result.success("Print completed: $statusMsg")
+                        }
+                    }
+                }
+            }
+
+            override fun onChangedPrinterStatus(job: WifiPrintJob, status: WifiPrinterStatus) {
+                // no-op
+            }
+        })
+
+        if (!started && resolved.compareAndSet(false, true)) {
+            resizedFile.delete()
+            mainHandler.post {
+                result.error("PRINT_START_FAILED", "Failed to start print job.", null)
+            }
+        }
+    }
+
+    // ── Paper size lookup ─────────────────────────────────────────────────────
+
+    // The full JPEG dimensions the SDK expects (includes a bleed margin) plus
+    // the printable area (the sub-rectangle that actually lands on the paper —
+    // the rest bleeds off the edge). The physical paper specs are identical
+    // across transports, so the USB SDK's size table is used for both.
+    private fun sizeInfoFor(paperSize: String): UsbPrintSizeInfo {
+        val paperType = when (paperSize) {
+            "L-size" -> UsbAccessoryInfo.PaperCassetteStatus.L
+            "Card"   -> UsbAccessoryInfo.PaperCassetteStatus.Card
+            else     -> UsbAccessoryInfo.PaperCassetteStatus.Post  // default: 4x6
+        }
+        return UsbPrintSizeInfo.getPrintSizeInfo(paperType)
+    }
+
     // ── Image resize ──────────────────────────────────────────────────────────
 
-    // Scales the image to fit entirely within (targetW × targetH), preserving
-    // aspect ratio. Any empty space is filled with white. EXIF orientation is
-    // applied automatically by ImageDecoder. Then applies brightness, filter,
-    // and border effects in order.
+    // Renders the image onto the full (jpegSize) canvas the SDK expects, fitting
+    // the WHOLE photo inside the printable area so nothing is cropped or printed
+    // off the paper edge. The photo is scaled to fit (contain) and centered
+    // within the printable rectangle; everything outside it (the off-paper bleed
+    // margin, plus any letterbox gap when the photo's shape differs from the
+    // paper) is filled white. EXIF orientation is applied automatically by
+    // ImageDecoder. Brightness and filter are then applied in order.
     private fun resizeImageForPrinting(
-        sourcePath: String, targetW: Int, targetH: Int,
+        sourcePath: String, jpegSize: Point, printable: Rect,
         filter: String, brightness: Int, bordered: Boolean
     ): File {
+        val targetW = jpegSize.x
+        val targetH = jpegSize.y
+
         // ImageDecoder (API 28+) automatically applies EXIF orientation, so no
         // manual rotation is needed and double-rotation on Samsung devices is avoided.
         val source = ImageDecoder.createSource(File(sourcePath))
@@ -240,39 +470,33 @@ class MainActivity : FlutterActivity() {
         val srcW = bmp.width.toFloat()
         val srcH = bmp.height.toFloat()
 
-        // Borderless: scale to FILL the paper (center-crop any overflow) so the
-        // photo covers the full 4×6 with no white bars.
-        // Bordered: scale to FIT within the bordered area (whole image visible).
-        var canvas: Bitmap
-        if (!bordered) {
-            val scale = maxOf(targetW / srcW, targetH / srcH)
-            val scaledW = (srcW * scale).toInt()
-            val scaledH = (srcH * scale).toInt()
-            val scaled = Bitmap.createScaledBitmap(bmp, scaledW, scaledH, true)
-            bmp.recycle()
-            val cropX = (scaledW - targetW) / 2
-            val cropY = (scaledH - targetH) / 2
-            val cropped = Bitmap.createBitmap(scaled, cropX, cropY, targetW, targetH)
-            if (cropped !== scaled) scaled.recycle()
-            canvas = cropped
-        } else {
-            // Fit inside the bordered area (4% inset on each side).
-            val borderPx = (targetW * 0.04f).toInt()
-            val innerW = targetW - borderPx * 2
-            val innerH = targetH - borderPx * 2
-            val scale = minOf(innerW / srcW, innerH / srcH)
-            val scaledW = (srcW * scale).toInt()
-            val scaledH = (srcH * scale).toInt()
-            val scaled = Bitmap.createScaledBitmap(bmp, scaledW, scaledH, true)
-            bmp.recycle()
-            canvas = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            val c = Canvas(canvas)
-            c.drawColor(Color.WHITE)
-            val left = (targetW - scaledW) / 2f
-            val top  = (targetH - scaledH) / 2f
-            c.drawBitmap(scaled, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
-            scaled.recycle()
-        }
+        // The on-paper printable region. A small uniform safety inset is always
+        // applied so every print has a clean, even white border (and so the
+        // printer's borderless overscan/feed tolerance isn't visible at the very
+        // edge). "Bordered" insets further for a larger, deliberate margin.
+        val insetFraction = if (bordered) 0.06f else 0.025f
+        val insetX = (printable.width() * insetFraction).toInt()
+        val insetY = (printable.height() * insetFraction).toInt()
+        val areaLeft = printable.left + insetX
+        val areaTop = printable.top + insetY
+        val areaW = printable.width() - insetX * 2
+        val areaH = printable.height() - insetY * 2
+
+        // Scale to FIT (contain) inside the printable area — the entire photo is
+        // visible. If aspect ratios differ, the shorter dimension is centered.
+        val scale = minOf(areaW / srcW, areaH / srcH)
+        val scaledW = (srcW * scale).toInt()
+        val scaledH = (srcH * scale).toInt()
+        val scaled = Bitmap.createScaledBitmap(bmp, scaledW, scaledH, true)
+        bmp.recycle()
+
+        var canvas = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+        val c = Canvas(canvas)
+        c.drawColor(Color.WHITE)
+        val left = areaLeft + (areaW - scaledW) / 2f
+        val top  = areaTop + (areaH - scaledH) / 2f
+        c.drawBitmap(scaled, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
+        scaled.recycle()
 
         // ── Brightness ────────────────────────────────────────────────────────
         if (brightness != 0) {
