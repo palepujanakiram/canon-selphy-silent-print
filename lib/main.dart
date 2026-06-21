@@ -20,10 +20,10 @@ class PrintSettings {
   final String filter;
   final int brightness;
   final bool bordered;
-  final String connection; // 'USB' or 'WiFi'
+  final String connection; // 'Auto', 'USB' or 'WiFi'
 
   static const paperSizes = ['4x6', 'L-size', 'Card'];
-  static const connections = ['USB', 'WiFi'];
+  static const connections = ['Auto', 'USB', 'WiFi'];
 
   const PrintSettings({
     this.copies = 1,
@@ -31,10 +31,11 @@ class PrintSettings {
     this.filter = 'Off',
     this.brightness = 0,
     this.bordered = false,
-    this.connection = 'USB',
+    this.connection = 'Auto',
   });
 
-  // Transport identifier passed to the native print method.
+  // Default transport for the native print method. In 'Auto' mode the actual
+  // transport is whichever connected at runtime; this is only the fallback.
   String get transport => connection == 'WiFi' ? 'wifi' : 'usb';
 
   Map<String, dynamic> toMap() => {
@@ -69,7 +70,7 @@ class PrintSettings {
         filter: prefs.getString('ps_filter') ?? 'Off',
         brightness: prefs.getInt('ps_brightness') ?? 0,
         bordered: prefs.getBool('ps_bordered') ?? false,
-        connection: prefs.getString('ps_connection') ?? 'USB',
+        connection: prefs.getString('ps_connection') ?? 'Auto',
       );
 
   Future<void> saveToPrefs(SharedPreferences prefs) async {
@@ -287,6 +288,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
   String _status = '';
   bool _printerReady = false;
   bool _printing = false;
+  String? _activeTransport; // 'usb' or 'wifi' — the transport that connected.
   late final Future<ui.Image> _imageSizeFuture;
 
   @override
@@ -300,26 +302,53 @@ class _PreviewScreenState extends State<PreviewScreen> {
   }
 
   Future<void> _checkPrinter() async {
-    final isWifi = widget.settings.connection == 'WiFi';
     setState(() {
       _printerReady = false;
-      _status = isWifi ? 'Searching for printer on Wi-Fi…' : 'Looking for USB printer…';
+      _activeTransport = null;
     });
+    final mode = widget.settings.connection;
     try {
-      // USB requests device permission; Wi-Fi discovers and auto-connects to
-      // the first printer found on the network.
-      final method = isWifi ? 'discoverWifi' : 'requestPermission';
-      final msg = await _channel.invokeMethod<String>(method);
-      setState(() {
-        _printerReady = true;
-        _status = msg ?? 'Printer ready';
-      });
+      if (mode == 'USB') {
+        await _connectUsb();
+      } else if (mode == 'WiFi') {
+        await _connectWifi();
+      } else {
+        // Auto: try USB first, fall back to Wi-Fi if no USB printer is found.
+        try {
+          await _connectUsb();
+        } on PlatformException {
+          setState(() => _status = 'No USB printer — trying Wi-Fi…');
+          await _connectWifi();
+        }
+      }
     } on PlatformException catch (e) {
       setState(() {
         _printerReady = false;
         _status = e.message ?? 'Printer not found';
       });
     }
+  }
+
+  // USB: requests device permission for the attached printer.
+  Future<void> _connectUsb() async {
+    setState(() => _status = 'Looking for USB printer…');
+    final msg = await _channel.invokeMethod<String>('requestPermission');
+    setState(() {
+      _printerReady = true;
+      _activeTransport = 'usb';
+      _status = msg ?? 'Printer ready (USB)';
+    });
+  }
+
+  // Wi-Fi: binds to the network and auto-connects to the first printer found.
+  Future<void> _connectWifi() async {
+    setState(() => _status = 'Searching for printer on Wi-Fi…');
+    final msg = await _channel.invokeMethod<String>('discoverWifi');
+    setState(() {
+      _printerReady = true;
+      _activeTransport = 'wifi';
+      _status = msg ?? 'Printer ready (Wi-Fi)';
+    });
   }
 
   Future<void> _print() async {
@@ -333,6 +362,8 @@ class _PreviewScreenState extends State<PreviewScreen> {
         {
           'filePath': widget.image.path,
           ...widget.settings.toMap(),
+          // Use the transport that actually connected (matters in Auto mode).
+          'transport': _activeTransport ?? widget.settings.transport,
         },
       );
       setState(() => _status = result ?? 'Done');
@@ -593,6 +624,11 @@ class _SettingsSheetState extends State<_SettingsSheet> {
           SegmentedButton<String>(
             segments: const [
               ButtonSegment(
+                value: 'Auto',
+                label: Text('Auto'),
+                icon: Icon(Icons.autorenew),
+              ),
+              ButtonSegment(
                 value: 'USB',
                 label: Text('USB'),
                 icon: Icon(Icons.usb),
@@ -606,6 +642,11 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             selected: {_draft.connection},
             onSelectionChanged: (v) =>
                 setState(() => _draft = _draft.copyWith(connection: v.first)),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Auto tries USB first, then Wi-Fi.',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
           ),
           const SizedBox(height: 16),
 
